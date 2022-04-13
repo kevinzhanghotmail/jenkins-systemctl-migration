@@ -1,0 +1,69 @@
+preinstall scriptlet (using /bin/sh):
+/usr/sbin/groupadd -r jenkins &>/dev/null || :
+# SUSE version had -o here, but in Fedora -o isn't allowed without -u
+/usr/sbin/useradd -g jenkins -s /bin/false -r -c "Jenkins Automation Server" \
+	-d "/var/lib/jenkins" jenkins &>/dev/null || :
+
+  # Used to decide later if we should perform a chown in case JENKINS_INSTALL_SKIP_CHOWN is false
+  # Check if a previous installation exists, if so check the JENKINS_HOME value and existing owners of work, log and cache dir, need to to this check
+  # here because the %files directive overwrites folder owners, I have not found a simple way to make the
+  # files directive to use JENKINS_USER as owner.
+  if [ -f "/etc/sysconfig/jenkins" ]; then
+      logger -t jenkins.installer "Found previous config file /etc/sysconfig/jenkins"
+      . "/etc/sysconfig/jenkins"
+      stat --format=%U "/var/cache/jenkins" > "/tmp/jenkins.installer.cacheowner"
+      stat --format=%U "/var/log/jenkins"  >  "/tmp/jenkins.installer.logowner"
+      stat --format=%U ${JENKINS_HOME:-/var/lib/jenkins}  > "/tmp/jenkins.installer.workdirowner"
+  else
+      logger -t jenkins.installer "No previous config file /etc/sysconfig/jenkins found"
+  fi
+postinstall scriptlet (using /bin/sh):
+/usr/share/jenkins/migrate "/etc/sysconfig/jenkins" || true
+
+if [ $1 -eq 1 ] ; then 
+        # Initial installation 
+        systemctl --no-reload preset jenkins.service &>/dev/null || : 
+fi 
+
+
+function chownIfNecessary {
+  logger -t jenkins.installer "Checking ${2} ownership"
+  if [ -f "${1}" ] ; then
+    owner=$(cat "$1")
+    rm -f "$1"
+    logger -t jenkins.installer "Found previous owner of ${2}: ${owner} "
+  fi
+  if  [ "${owner:-jenkins}" != "${JENKINS_USER:-jenkins}" ] ; then
+    logger -t jenkins.installer "Previous owner of ${2} is different than configured JENKINS_USER... Doing a recursive chown of ${2} "
+    chown -R ${JENKINS_USER:-jenkins} "$2"
+  elif [ "${JENKINS_USER:-jenkins}" != "jenkins" ] ; then
+    # User has changed ownership of files and JENKINS_USER, chown only the folder
+    logger -t jenkins.installer "Configured JENKINS_USER is different than default... Doing a non recursive chown of ${2} "
+    chown ${JENKINS_USER:-jenkins} "$2"
+  else
+    logger -t jenkins.installer "No chown needed for ${2} "
+  fi
+}
+
+# Ensure the right ownership on files only if not owned by JENKINS_USER and JENKINS_USER
+# != jenkins, namely all cases but the default one (configured for jenkins owned by jenkins)
+# In any case if JENKINS_INSTALL_SKIP_CHOWN is true we do not chown anything to maintain
+# the existing semantics
+. /etc/sysconfig/jenkins
+if test x"$JENKINS_INSTALL_SKIP_CHOWN" != "xtrue"; then
+      chownIfNecessary "/tmp/jenkins.installer.cacheowner"  "/var/cache/jenkins"
+      chownIfNecessary "/tmp/jenkins.installer.logowner"  "/var/log/jenkins"
+      chownIfNecessary "/tmp/jenkins.installer.workdirowner"  ${JENKINS_HOME:-/var/lib/jenkins}
+fi
+preuninstall scriptlet (using /bin/sh):
+
+if [ $1 -eq 0 ] ; then 
+        # Package removal, not upgrade 
+        systemctl --no-reload disable --now jenkins.service &>/dev/null || : 
+fi
+postuninstall scriptlet (using /bin/sh):
+
+if [ $1 -ge 1 ] ; then 
+        # Package upgrade, not uninstall 
+        systemctl try-restart jenkins.service &>/dev/null || : 
+fi
